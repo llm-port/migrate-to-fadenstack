@@ -583,7 +583,10 @@ class Server:
                 continue
             moved, kept = self._merge_tree(src, repo / new)
             if moved or kept:
-                Out.ok(f"{old}/ -> {new}/: {moved} files moved" + (f", {kept} kept in place (both exist)" if kept else ""))
+                if Out.dry:
+                    Out.would(f"move what git does not track from {old}/ to {new}/ (after the checkout)")
+                else:
+                    Out.ok(f"{old}/ -> {new}/: {moved} files moved" + (f", {kept} kept in place (both exist)" if kept else ""))
 
     def _merge_tree(self, src: Path, dst: Path) -> tuple[int, int]:
         moved = kept = 0
@@ -846,7 +849,7 @@ class Server:
         found = self.args.faden or shutil.which("faden") or \
             (str(Path.home() / ".local" / "bin" / "faden") if (Path.home() / ".local" / "bin" / "faden").exists() else None)
         uv = shutil.which("uv") or (str(Path.home() / ".local" / "bin" / "uv") if (Path.home() / ".local" / "bin" / "uv").exists() else None)
-        if self.checkout and uv and (self.checkout / "cli" / "pyproject.toml").is_file():
+        if self.checkout and uv and (Out.dry or (self.checkout / "cli" / "pyproject.toml").is_file()):
             def install() -> None:
                 run([uv, "tool", "install", "--force", str(self.checkout / "cli")])
             act(f"install it from the checkout: uv tool install --force {self.checkout / 'cli'}", install)
@@ -914,8 +917,8 @@ def migrate_timers(state: State) -> None:
             run(["systemctl", "--user", "enable", "--now", f"{new_unit}.timer"])
         act(f"{old_unit}.timer -> {new_unit}.timer (same schedule, runs faden)", move)
     # cron, where there is no systemd user manager
-    cron = run(["crontab", "-l"], check=False, quiet=True)
-    if cron.returncode == 0 and re.search(r"# llmport-(backup|tls-renew)$", cron.stdout, re.M):
+    cron = run(["crontab", "-l"], check=False, quiet=True) if shutil.which("crontab") else None
+    if cron is not None and cron.returncode == 0 and re.search(r"# llmport-(backup|tls-renew)$", cron.stdout, re.M):
         found = True
         new = "\n".join(rename(line) if re.search(r"# llmport-(backup|tls-renew)$", line) else line
                         for line in cron.stdout.splitlines()) + "\n"
@@ -1067,10 +1070,12 @@ class Machine:
         Out.step("Install faden-agent")
         env = env_values(self.new_env.read_text()) if self.new_env.is_file() else env_values(self.old_env.read_text()) \
             if self.old_env.is_file() else {}
-        server = (self.args.server or env.get("FADEN_NODE_AGENT_BACKEND_URL") or env.get("LLM_PORT_NODE_AGENT_BACKEND_URL") or "").rstrip("/")
+        server = (self.args.server or self._moved_to() or env.get("FADEN_NODE_AGENT_BACKEND_URL")
+                  or env.get("LLM_PORT_NODE_AGENT_BACKEND_URL") or "").rstrip("/")
         if not server:
             die("which server? Pass --server https://<fadenstack server>")
         ca = self.args.ca_file or self._server_ca(env)
+        Out.info(f"server {server}" + (f", trusted through {ca}" if ca else ""))
         ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
         url = f"{server}/api/install/faden-agent.sh"
         try:
@@ -1107,11 +1112,25 @@ class Machine:
         self.state.mark("installed")
         Out.ok("faden-agent is running; the server's console shows the machine again within a minute")
 
+    def _state_dir(self) -> Path:
+        return self.new_state if self.new_state.is_dir() else self.old_state
+
+    def _moved_to(self) -> str | None:
+        """The HTTPS address the agent moved to by itself (server-address.json), if it did."""
+        try:
+            data = json.loads((self._state_dir() / "server-address.json").read_text())
+        except (OSError, ValueError):
+            return None
+        return data.get("to") or None
+
     def _server_ca(self, env: dict[str, str]) -> str | None:
-        bundle = env.get("FADEN_NODE_AGENT_TLS_CA_BUNDLE")
-        if bundle and Path(bundle).expanduser().is_file():
-            return str(Path(bundle).expanduser())
-        own = self.new_state / "server-ca.pem"
+        """What the agent trusts the server by: its CA bundle setting, or the authority it learned."""
+        for key in ("FADEN_NODE_AGENT_TLS_CA_BUNDLE", "LLM_PORT_NODE_AGENT_TLS_CA_BUNDLE"):
+            bundle = env.get(key)
+            for candidate in (bundle, rename(bundle) if bundle else None):
+                if candidate and Path(candidate).expanduser().is_file():
+                    return str(Path(candidate).expanduser())
+        own = self._state_dir() / "server-ca.pem"
         return str(own) if own.is_file() else None
 
 
