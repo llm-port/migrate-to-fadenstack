@@ -112,3 +112,14 @@ def test_config_path() -> None:
     home = Path.home()
     assert m.new_config_path(home / ".config" / "llmport" / "llmport.yaml") == home / ".config" / "faden" / "faden.yaml"
     assert m.new_config_path(home / "fresh" / "llmport.yaml") == home / "fresh" / "faden.yaml"
+
+
+def test_a_timer_runs_the_installed_faden(tmp_path: Path) -> None:
+    faden = tmp_path / "tools" / "fadenstack" / "bin" / "faden"
+    faden.parent.mkdir(parents=True)
+    faden.write_text("")
+    unit = m.rename("ExecStart=/home/u/.local/share/uv/tools/llmport-cli/bin/llmport backup -y --retain 7\n")
+    assert unit == "ExecStart=/home/u/.local/share/uv/tools/fadenstack/bin/faden backup -y --retain 7\n"
+    assert m._runs_faden(unit, str(faden)) == f"ExecStart={faden} backup -y --retain 7\n"
+    kept = f"ExecStart={faden} tls renew\n"
+    assert m._runs_faden(kept, "/elsewhere/faden") == kept

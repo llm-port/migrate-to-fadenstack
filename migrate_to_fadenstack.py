@@ -131,6 +131,7 @@ RULES: list[tuple[str, str]] = [
     # the agent, RabbitMQ users, containers, images, paths
     (L + r"llmport-agent", "faden-agent"),
     (L + r"llmport_agent", "faden_agent"),
+    (L + r"llmport-cli\b", "fadenstack"),  # the PyPI package (and its uv tool folder)
     (L + r"llmport-api\b", "faden-gateway"),
     (L + r"llm-port-api\b", "faden-gateway"),
     (r"/srv/llm-port\b", "/srv/faden"),
@@ -841,7 +842,7 @@ class Server:
 
     def timers(self) -> None:
         Out.step("Scheduled jobs (backup, certificate renewal)")
-        migrate_timers(self.state)
+        migrate_timers(self.state, self.args.faden)
 
     def cli(self) -> None:
         """The new CLI: from the checkout (uv tool), or already installed (pip install fadenstack)."""
@@ -894,10 +895,27 @@ class Server:
         Out.info("machines            run 'migrate machine' on each (see the top of this file)")
 
 
-def migrate_timers(state: State) -> None:
+def _resolved(cmd: str | None) -> str | None:
+    found = shutil.which(cmd) if cmd and not os.path.isabs(cmd) else cmd
+    return str(Path(found).resolve()) if found and Path(found).exists() else None
+
+
+def _runs_faden(text: str, faden: str | None) -> str:
+    """ExecStart / a crontab line running the renamed CLI by a path that does not exist: the installed one."""
+    if not faden:
+        return text
+
+    def fix(m: re.Match) -> str:
+        return m.group(1) + (m.group(2) if Path(m.group(2)).exists() else faden)
+    text = re.sub(r"^(ExecStart=)(\S+/faden)(?=\s|$)", fix, text, flags=re.M)
+    return re.sub(r"(\s)(/\S+/faden)(?= )", fix, text)
+
+
+def migrate_timers(state: State, faden: str | None = None) -> None:
     if sys.platform != "linux":
         Out.info("no systemd here")
         return
+    faden = _resolved(faden or "faden")
     unit_dir = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "systemd" / "user"
     found = False
     for old_unit in ("llmport-backup", "llmport-tls-renew"):
@@ -911,7 +929,7 @@ def migrate_timers(state: State) -> None:
             for src in (service, timer):
                 if src.is_file():
                     dst = unit_dir / src.name.replace(old_unit, new_unit)
-                    dst.write_text(rename(src.read_text()))
+                    dst.write_text(_runs_faden(rename(src.read_text()), faden))
                     src.unlink()
             run(["systemctl", "--user", "daemon-reload"], check=False, quiet=True)
             run(["systemctl", "--user", "enable", "--now", f"{new_unit}.timer"])
@@ -923,6 +941,16 @@ def migrate_timers(state: State) -> None:
         new = "\n".join(rename(line) if re.search(r"# llmport-(backup|tls-renew)$", line) else line
                         for line in cron.stdout.splitlines()) + "\n"
         act("rewrite the crontab's llmport lines", lambda: run(["crontab", "-"], input=new))
+    # units moved by an earlier run of this tool may run a path that does not exist
+    for unit in sorted(unit_dir.glob("faden-*.service")) if unit_dir.is_dir() else []:
+        text = unit.read_text()
+        fixed = _runs_faden(text, faden)
+        if fixed != text:
+            found = True
+            def repair(unit=unit, fixed=fixed) -> None:
+                unit.write_text(fixed)
+                run(["systemctl", "--user", "daemon-reload"], check=False, quiet=True)
+            act(f"{unit.name}: run {faden}", repair)
     if not found:
         Out.ok("none scheduled")
     state.mark("timers")
