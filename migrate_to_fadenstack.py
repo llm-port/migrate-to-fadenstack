@@ -636,10 +636,15 @@ class Server:
             Out.ok(f"{f} carries no old name")
             return
         new_text, changes = rename_env(text)
+        if new_text == text:
+            Out.ok(f"{f}: nothing left to rename (Langfuse's own ids keep theirs)")
+            return
         for c in changes:
             Out.info(c)
         def write() -> None:
-            shutil.copy2(f, f.with_name(".env.pre-fadenstack"))
+            keep = f.with_name(".env.pre-fadenstack")
+            if not keep.exists():  # the original, never a later copy
+                shutil.copy2(f, keep)
             f.write_bytes(new_text.encode("utf-8"))
         act(f"rewrite {f} ({len(changes)} lines; the old one kept as .env.pre-fadenstack)", write)
         self.state.mark("env")
@@ -1194,10 +1199,14 @@ def dev(args: argparse.Namespace) -> None:
             if not OLD.search(text):
                 continue
             new_text, changes = rename_env(text, keep_paths=True)
+            if new_text == text:
+                continue
             for c in changes:
                 Out.info(c)
             def write(f=f, new_text=new_text) -> None:
-                shutil.copy2(f, f.with_name(f.name + ".pre-fadenstack"))
+                keep = f.with_name(f.name + ".pre-fadenstack")
+                if not keep.exists():  # the original, never a later copy
+                    shutil.copy2(f, keep)
                 f.write_bytes(new_text.encode("utf-8"))
             act(f"rewrite {folder}/{name} ({len(changes)} lines)", write)
     s.config()
