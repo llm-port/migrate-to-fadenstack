@@ -1138,10 +1138,14 @@ class Machine:
             shutil.move(str(old_unit), str(self.backup_dir / old_unit.name))
             run([*self.systemctl, "daemon-reload"], check=False, quiet=True)
             Out.ok("removed the old service unit (kept in the backup)")
-        old_bin = shutil.which("llmport-agent")
-        if old_bin and os.access(Path(old_bin).parent, os.W_OK):
-            shutil.move(old_bin, str(self.backup_dir / "llmport-agent"))
-            Out.ok(f"moved the old binary {old_bin} into the backup")
+        # ~/.local/bin is often not on PATH in a non-interactive shell: look where the installer put it
+        candidates = [shutil.which("llmport-agent"), str(Path.home() / ".local" / "bin" / "llmport-agent"),
+                      "/usr/local/bin/llmport-agent"]
+        for old_bin in dict.fromkeys(c for c in candidates if c and Path(c).is_file()):
+            if os.access(Path(old_bin).parent, os.W_OK):
+                self.backup_dir.mkdir(parents=True, exist_ok=True)
+                shutil.move(old_bin, str(self.backup_dir / "llmport-agent"))
+                Out.ok(f"moved the old binary {old_bin} into the backup")
         self.state.mark("installed")
         Out.ok("faden-agent is running; the server's console shows the machine again within a minute")
 
